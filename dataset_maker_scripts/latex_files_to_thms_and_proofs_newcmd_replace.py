@@ -18,6 +18,20 @@ MAX_STMT_LENGTH = 3000
 MAX_PROOF_LENGTH = 7000
 ATTACH_GAP_HIGH_CONF = 1500
 
+
+
+
+
+
+# counters
+replaced_text_count = 0
+replace_count = 0
+replace_char = 0
+
+
+
+
+
 STATEMENT_KEYWORDS = (
     "theorem", "lemma", "proposition", "corollary", "definition",
     "claim", "conjecture",
@@ -96,12 +110,26 @@ def find_new_def(latex_content):
     return {m[1]: m[3] for m in no_para}
 
 
+
+
+
 def replace_new_def(latex_content, replace_dict):
     """Replace custom defined commands with the base latex.
     Peturn replaced string"""
+
+    global replace_count, replace_char, replaced_text_count
+
     if (len(replace_dict)):
         p = "(?:" + "|".join(map(re.escape, replace_dict.keys())) + r")(?![A-Za-z])"
         replace_pattern = re.compile(p)
+
+        # counting
+        m = re.findall(replace_pattern, latex_content)
+        if len(m) != 0:
+            replaced_text_count += 1
+        replace_count += len(m)
+        for s in m:
+            replace_char += len(s)
         return re.sub(replace_pattern, lambda m: replace_dict[m.group(0)], latex_content)
 
     else:
@@ -362,6 +390,12 @@ def process_tex_directories():
     print(f"Statements found:       {n_statements}")
     print(f"Proofs found:           {n_proofs}")
     print(f"Proof sections found:   {n_proof_sections}")
+
+    print(f"Replaced text count:   {replaced_text_count}")
+    print(f"Replaced ratio:   {round(replaced_text_count/(n_statements+n_proof_sections+n_proofs), 2)}")
+    print(f"Replacement count:   {replace_count}")
+    print(f"Replaced char count:   {replace_char}")
+
     print(f"Statements -> {STATEMENTS_OUT}")
     print(f"Proofs     -> {PROOFS_OUT}")
 
