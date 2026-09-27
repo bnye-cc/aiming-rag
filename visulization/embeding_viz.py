@@ -1,6 +1,11 @@
 from dash import Dash, html, dcc, callback, Input, Output, State, Patch, no_update
 import dash_bootstrap_components as dbc
 
+from functools import lru_cache
+import re
+import shutil
+import subprocess
+
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -43,6 +48,39 @@ CATEGORIES = [
     "math.SP (Spectral Theory)",
     "math.ST (Statistics Theory)",
 ]
+
+MAX_SELECTED_CATEGORIES = 5
+PANDOC_CACHE_SIZE = 2048
+PANDOC_TIMEOUT_SECONDS = 3
+
+# Resolve Pandoc once at startup instead of searching PATH after every click.
+PANDOC_PATH = shutil.which("pandoc")
+
+# Keep input cleanup deliberately small. Pandoc handles LaTeX structure; these
+# patterns only remove empty math fragments that its Markdown writer preserves.
+EMPTY_DISPLAY_MATH_PATTERN = re.compile(
+    r"(?<!\\)(?<!\$)\$\$\s*\$\$(?!\$)",
+    flags=re.DOTALL,
+)
+EMPTY_INLINE_MATH_PATTERN = re.compile(
+    r"(?<!\\)(?<!\$)\$(?!\$)\s*\$(?!\$)",
+    flags=re.DOTALL,
+)
+PANDOC_DISPLAY_MATH_PATTERN = re.compile(
+    r"(?<!\\)\$\$(?P<math>.*?)(?<!\\)\$\$",
+    flags=re.DOTALL,
+)
+PANDOC_INLINE_MATH_PATTERN = re.compile(
+    r"(?<!\\)(?<!\$)\$(?!\$)(?P<math>.*?)(?<!\\)\$(?!\$)",
+    flags=re.DOTALL,
+)
+MATHJAX_TEXT_MACRO_PATTERN = re.compile(
+    r"\\(?:text(?:normal|up|rm|it|bf|sf|tt)?|emph)\s*\{"
+)
+MATHJAX_TEXTMACROS_REQUIRE = r"\require{textmacros}"
+MATHJAX_ENSUREMATH_PATTERN = re.compile(
+    r"(?<!\\)\\ensuremath(?![A-Za-z@])"
+)
 
 # Use one global category order and color mapping across every filter result.
 CATEGORY_CODES = [label.split(" ", 1)[0] for label in CATEGORIES]
@@ -104,6 +142,9 @@ POINT_IDS_BY_FILTER = build_point_id_lookup(meta_df)
 
 print("point ids lookup built")
 
+if PANDOC_PATH is None:
+    print("warning: Pandoc was not found; LaTeX previews will use raw source")
+
 max_x = ((meta_df["x"].max() // 5) + 1) * 5
 max_y = ((meta_df["y"].max() // 5) + 1) * 5
 min_x = (meta_df["x"].min() // 5) * 5
@@ -118,6 +159,21 @@ def get_category_codes(select_categories):
 
     # Follow the global order instead of the dropdown selection or row order.
     return [code for code in CATEGORY_CODES if code in selected]
+
+
+def get_category_options(select_categories):
+    selected = set(select_categories or [])
+    limit_reached = len(selected) >= MAX_SELECTED_CATEGORIES
+
+    # Keep selected categories removable while preventing any additional choice.
+    return [
+        {
+            "label": category,
+            "value": category,
+            "disabled": limit_reached and category not in selected,
+        }
+        for category in CATEGORIES
+    ]
 
 
 def get_filtered_df(meta_df: pd.DataFrame, category_codes, select_type):
@@ -204,12 +260,111 @@ def scatter_plot(filtered_df, selected_codes):
 
     return apply_common_layout(go.Figure(data=traces)), highlight_trace_index
 
+
+def clean_latex_for_pandoc(raw_text):
+    """Remove only empty math spans before passing the fragment to Pandoc."""
+    cleaned = EMPTY_DISPLAY_MATH_PATTERN.sub("", raw_text)
+    cleaned = EMPTY_INLINE_MATH_PATTERN.sub("", cleaned)
+    return cleaned.strip()
+
+
+def prepare_math_for_mathjax(math_source):
+    """Normalize LaTeX wrappers and load MathJax text-mode macros as needed."""
+    # The source is already inside MathJax delimiters, so \ensuremath is an
+    # identity wrapper. Removing only the command keeps its braced argument and
+    # grouping unchanged without requiring unsupported LaTeX document macros.
+    math_source = MATHJAX_ENSUREMATH_PATTERN.sub("", math_source.strip())
+
+    # Dash loads MathJax 3's compact tex-svg component. Explicitly request the
+    # textmacros extension so nested forms such as \textsf{\textit{D}} and
+    # \textnormal{\textrm{R}} keep both formatting levels.
+    if (
+        MATHJAX_TEXT_MACRO_PATTERN.search(math_source)
+        and MATHJAX_TEXTMACROS_REQUIRE not in math_source
+    ):
+        return f"{MATHJAX_TEXTMACROS_REQUIRE} {math_source}"
+
+    return math_source
+
+
+@lru_cache(maxsize=PANDOC_CACHE_SIZE)
+def convert_latex_to_markdown(raw_text):
+    """Convert one LaTeX fragment to MathJax-compatible CommonMark."""
+    cleaned_source = clean_latex_for_pandoc(raw_text)
+
+    if not cleaned_source:
+        return "", None
+
+    if PANDOC_PATH is None:
+        return (
+            cleaned_source,
+            "Pandoc is not installed, so this preview is showing the original LaTeX.",
+        )
+
+    command = [
+        PANDOC_PATH,
+        "--sandbox",
+        "--from=latex+raw_tex",
+        "--to=commonmark_x-raw_html-fenced_divs",
+        "--wrap=none",
+    ]
+
+    try:
+        result = subprocess.run(
+            command,
+            input=cleaned_source,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            timeout=PANDOC_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            cleaned_source,
+            "Pandoc timed out, so this preview is showing the original LaTeX.",
+        )
+    except OSError as error:
+        return (
+            cleaned_source,
+            f"Pandoc could not be started ({error}), so the original LaTeX is shown.",
+        )
+
+    if result.returncode != 0:
+        error_message = result.stderr.strip() or "unknown Pandoc error"
+        return (
+            cleaned_source,
+            f"Pandoc conversion failed ({error_message}); the original LaTeX is shown.",
+        )
+
+    # Pandoc preserves unknown text macros as raw-LaTeX code spans. Remove its
+    # writer-specific attribute while keeping the unsupported command visible.
+    markdown = result.stdout.replace("{=latex}", "").strip()
+    markdown = PANDOC_DISPLAY_MATH_PATTERN.sub(
+        lambda match: (
+            f"\n\n$$\n{prepare_math_for_mathjax(match.group('math'))}\n$$\n\n"
+        ),
+        markdown,
+    )
+    markdown = PANDOC_INLINE_MATH_PATTERN.sub(
+        lambda match: f"${prepare_math_for_mathjax(match.group('math'))}$",
+        markdown,
+    )
+    markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip()
+    return markdown, None
+
+
 app = Dash("embedding space", external_stylesheets=[dbc.themes.BOOTSTRAP])
 
 category_select = html.Div(
     [
-        dbc.Label("Select Categories"),  # type: ignore
-        dcc.Dropdown(id="categories", options=CATEGORIES, multi=True, value=[]),
+        dbc.Label("Select Categories (up to 5)"),  # type: ignore
+        dcc.Dropdown(
+            id="categories",
+            options=get_category_options([]),
+            multi=True,
+            value=[],
+        ),
     ]
 )
 
@@ -231,11 +386,61 @@ scatter = html.Div(
     ]
 )
 
-texts = html.Div(
+texts = dbc.Card(
     [
-        dbc.Label("Select statement"),  # type: ignore
-        dbc.Textarea(id="text", value=""),  # type: ignore
-    ]
+        dbc.CardHeader("Selected statement"),
+        dbc.CardBody(
+            [
+                html.Div(
+                    "Click a point to inspect its statement.",
+                    id="statement_metadata",
+                    className="text-muted mb-3",
+                ),
+                dbc.Alert(
+                    id="latex_warning",
+                    color="warning",
+                    is_open=False,
+                    className="py-2",
+                ),
+                dcc.Loading(
+                    dcc.Markdown(
+                        id="statement_latex",
+                        children="",
+                        mathjax=True,
+                        link_target="_blank",
+                        style={
+                            "overflowX": "auto",
+                            "minHeight": "8rem",
+                            "padding": "0.75rem",
+                            "backgroundColor": "rgba(248, 249, 250, 0.75)",
+                            "borderRadius": "0.375rem",
+                        },
+                    ),
+                    type="default",
+                ),
+                html.Details(
+                    [
+                        html.Summary("Raw LaTeX", className="fw-semibold"),
+                        html.Pre(
+                            id="statement_raw",
+                            children="",
+                            style={
+                                "whiteSpace": "pre-wrap",
+                                "overflowWrap": "anywhere",
+                                "marginTop": "0.75rem",
+                                "padding": "0.75rem",
+                                "backgroundColor": "#f8f9fa",
+                                "border": "1px solid #dee2e6",
+                                "borderRadius": "0.375rem",
+                            },
+                        ),
+                    ],
+                    className="mt-3",
+                ),
+            ]
+        ),
+    ],
+    className="h-100",
 )
 
 controls = html.Div(
@@ -302,6 +507,23 @@ app.layout = html.Div(
 
 
 @callback(
+    Output("categories", "options"),
+    Output("categories", "value"),
+    Input("categories", "value"),
+)
+def enforce_category_limit(select_categories):
+    # Deduplicate defensively and reject any selection beyond the configured limit.
+    unique_categories = list(dict.fromkeys(select_categories or []))
+    limited_categories = unique_categories[:MAX_SELECTED_CATEGORIES]
+    options = get_category_options(limited_categories)
+
+    if unique_categories != limited_categories:
+        return options, limited_categories
+
+    return options, no_update
+
+
+@callback(
     Output("scatter_plot", "figure"),
     Output("highlight_trace_index", "data"),
     Input("categories", "value"),
@@ -318,7 +540,11 @@ def update_scatter(select_categories, select_type):
 
 
 @callback(
-    Output("text", "value"),
+    Output("statement_metadata", "children"),
+    Output("statement_latex", "children"),
+    Output("latex_warning", "children"),
+    Output("latex_warning", "is_open"),
+    Output("statement_raw", "children"),
     Output("scatter_plot", "figure", allow_duplicate=True),
     Input("scatter_plot", "clickData"),
     State("highlight_trace_index", "data"),
@@ -337,14 +563,14 @@ def display_text(
         or not click_data.get("points")
         or highlight_trace_index is None
     ):
-        return no_update, no_update
+        return (no_update,) * 6
 
     point = click_data["points"][0]
     curve_number = point.get("curveNumber")
     point_number = point.get("pointNumber")
 
     if curve_number is None or point_number is None:
-        return no_update, no_update
+        return (no_update,) * 6
 
     curve_number = int(curve_number)
     point_number = int(point_number)
@@ -353,7 +579,7 @@ def display_text(
     # curveNumber identifies the fixed-order category trace; the final trace is
     # reserved for highlighting and must never be used for point lookup.
     if curve_number < 0 or curve_number >= len(selected_codes):
-        return no_update, no_update
+        return (no_update,) * 6
 
     category = selected_codes[curve_number]
     filter_type = select_type if select_type and select_type != "All" else "All"
@@ -361,15 +587,19 @@ def display_text(
 
     # pointNumber indexes the same original-row order used to build each trace.
     if point_ids is None or point_number < 0 or point_number >= len(point_ids):
-        return no_update, no_update
+        return (no_update,) * 6
 
     point_id = int(point_ids[point_number])
     row = meta_df.loc[point_id]
-    info = (
-        f"paper id: {row['paper_id']}\n"
-        f"type: {row['type']}\n"
-        f"category: {row['categories']}\n\n"
-        f"{row['text']}"
+    raw_text = "" if pd.isna(row["text"]) else str(row["text"]) # type: ignore
+    markdown_preview, conversion_warning = convert_latex_to_markdown(raw_text)
+
+    metadata = html.Div(
+        [
+            html.Div([html.Strong("Paper ID: "), str(row["paper_id"])]),
+            html.Div([html.Strong("Type: "), str(row["type"])]),
+            html.Div([html.Strong("Category: "), str(row["categories"])]),
+        ]
     )
 
     # Patch only the final one-point trace; the base point cloud is not retransmitted.
@@ -377,7 +607,14 @@ def display_text(
     patched_figure["data"][highlight_trace_index]["x"] = [point["x"]]
     patched_figure["data"][highlight_trace_index]["y"] = [point["y"]]
 
-    return info, patched_figure
+    return (
+        metadata,
+        markdown_preview,
+        conversion_warning or "",
+        conversion_warning is not None,
+        raw_text,
+        patched_figure,
+    )
 
 
 app.run(debug=True)
