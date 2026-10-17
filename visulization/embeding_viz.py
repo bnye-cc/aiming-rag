@@ -25,9 +25,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # CSV File to visualize
-# DATA = r"C:\E\works\CC\4\BlockA\RAG\data\plot_data\tsne\theorems_Qwen3-Embedding-0.6B_new_ALL_50k_all_tsne.csv"
+DATA = r"C:\E\works\CC\4\BlockA\RAG\data\plot_data\tsne\theorems_Qwen3-Embedding-0.6B_new_ALL_50k_all_tsne.csv"
 # DATA = r"C:\E\works\CC\4\BlockA\RAG\data\plot_data\tsne\theorems_Qwen3-Embedding-0.6B_ALL_50k_only6_tsne_projection_clean.csv"
-DATA = r"C:\E\works\CC\4\BlockA\RAG\data\plot_data\tsne\theorems_Qwen3-Embedding-0.6B_new_base_all_tsne.csv"
+# DATA = r"C:\E\works\CC\4\BlockA\RAG\data\plot_data\tsne\theorems_Qwen3-Embedding-0.6B_new_base_all_tsne.csv"
 
 CATEGORIES = [
     "math.AC (Commutative Algebra)",
@@ -382,8 +382,8 @@ def find_paper_points_in_view(selected_codes, select_type, paper_ids):
 
         paper_values = meta_df.loc[point_ids, "paper_id"].to_numpy(
             dtype=object,
-            na_value=None,
-        )
+            na_value=None,# type: ignore
+        ) 
         visible_groups.append((point_ids, paper_values))
 
     matches_by_paper = {}
@@ -897,13 +897,6 @@ paper_search_panel = dbc.Card(
                     className="g-3",
                 ),
                 html.Div(
-                    "Enter at least one paper ID or a keyword. When both are "
-                    "provided, only matching statements from those papers are "
-                    "highlighted. Searches use the currently selected categories "
-                    "and statement type.",
-                    className="form-text mb-3",
-                ),
-                html.Div(
                     [
                         dbc.Button(
                             "Search",
@@ -1033,16 +1026,107 @@ graphs = html.Div(
             className="g-3",
             align="start",
         ),  # type: ignore
-        dbc.Label(
-            "*Tips: Start with select categories, click on points to show more details",
-            color="Gray",
-            style={"background": "rgba(192, 255, 255, 0.5)"},
-        ),  # type: ignore
     ],
     className="mt-3",
 )
 
-about = html.Div(html.P("#TODO"))
+about = html.Div(
+    [
+        dbc.Card(
+            [
+                dbc.CardHeader("Exploring the Embedding Space"),
+                dbc.CardBody(
+                    [
+                        html.P(
+                            "Each point represents one theorem-like mathematical "
+                            "statement extracted from a research paper, such as a "
+                            "theorem, definition, lemma, proposition, corollary, "
+                            "conjecture, or claim. The plotted statements are encoded "
+                            "with an all-domain NaturalPRISM embedding model fine-tuned "
+                            "on examples spanning mathematical subject areas. Point "
+                            "metadata identifies the statement type, source paper, and "
+                            "mathematical category.",
+                            className="mb-3",
+                        ),
+                        html.P(
+                            "The model is trained to retrieve a relevant mathematical "
+                            "statement given a partial proof. Nearby statements are "
+                            "therefore best understood as occupying similar retrieval "
+                            "neighborhoods: the model may associate them with the same "
+                            "or similar kinds of partial proofs. This suggests that the "
+                            "model treats them as related for this retrieval task. It is "
+                            "an indirect signal, since training directly connects partial "
+                            "proofs with target statements rather than explicitly "
+                            "training pairs of statements to be close.",
+                            className="mb-3",
+                        ),
+                        html.P(
+                            "Each statement is represented by a high-dimensional vector, "
+                            "which t-SNE projects onto two dimensions for interactive "
+                            "exploration. The projection can distort distances and is "
+                            "most useful for exploring local neighborhoods. The axes "
+                            "have no direct mathematical meaning, and proximity does "
+                            "not establish that two statements are equivalent or that "
+                            "any particular partial proof would retrieve both equally "
+                            "well.",
+                            className="mb-0",
+                        ),
+                    ]
+                ),
+            ],
+            className="mb-3",
+        ),
+        dbc.Card(
+            [
+                dbc.CardHeader("About NaturalPRISM"),
+                dbc.CardBody(
+                    html.P(
+                        "NaturalPRISM studies how to retrieve mathematical premises "
+                        "needed to continue a proof written in natural language. We "
+                        "collected LaTeX papers from 235,314 arXiv mathematics papers "
+                        "published between April 2007 and the end of 2018, spanning 32 "
+                        "subject categories. After cleaning and filtering, we paired "
+                        "partial proofs with the theorem-like statements they reference, "
+                        "producing 1,779,598 examples. These examples were used to "
+                        "fine-tune embedding models for mathematical retrieval. See the "
+                        "paper for details on the dataset, training, and evaluation.",
+                        className="mb-0",
+                    )
+                ),
+            ],
+            className="mb-3",
+        ),
+        dbc.Card(
+            [
+                dbc.CardHeader("Related Links"),
+                dbc.CardBody(
+                    html.Ul(
+                        [
+                            html.Li(
+                                html.A(
+                                    "Read the paper",
+                                    href="PAPER_LINK_PLACEHOLDER",
+                                    target="_blank",
+                                    rel="noopener noreferrer",
+                                )
+                            ),
+                            html.Li(
+                                html.A(
+                                    "Project GitHub repository",
+                                    href="GITHUB_LINK_PLACEHOLDER",
+                                    target="_blank",
+                                    rel="noopener noreferrer",
+                                )
+                            ),
+                        ],
+                        className="mb-0",
+                    )
+                ),
+            ]
+        ),
+    ],
+    className="mt-3",
+)
 
 body = html.Div(
     [
@@ -1055,7 +1139,47 @@ body = html.Div(
         dcc.Store(id="point_history_event", data=None),
         dcc.Store(id="history_replay_request", data=None),
         html.H1("Embedding Space", style={"text-align": "center"}),
-        html.H2("Scatter Plot"),
+        html.Div(
+            [
+                html.H2("Scatter Plot", className="mb-0"),
+                html.Span(
+                    [
+                        "How to use ",
+                        html.Span(
+                            "?",
+                            className=(
+                                "border rounded-circle d-inline-flex "
+                                "align-items-center justify-content-center"
+                            ),
+                            style={
+                                "width": "1.25rem",
+                                "height": "1.25rem",
+                                "fontSize": "0.8rem",
+                                "fontWeight": "bold",
+                            },
+                        ),
+                    ],
+                    id="embedding_help_target",
+                    tabIndex=0,
+                    role="button",
+                    className="text-muted small d-inline-flex align-items-center gap-1",
+                    style={"cursor": "help"},
+                ),
+                dbc.Tooltip(
+                    "Choose up to five categories and a statement type to filter "
+                    "the plot. Click a point to inspect its statement and metadata. "
+                    "To find statements from particular papers, enter one or more "
+                    "paper IDs; you may also add a keyword. If both are supplied, "
+                    "results must match both. Searches use the selected categories "
+                    "and statement type. Use Query History to revisit recent "
+                    "searches or points.",
+                    target="embedding_help_target",
+                    placement="right",
+                    style={"maxWidth": "360px", "textAlign": "left"},
+                ),
+            ],
+            className="d-flex align-items-center gap-2",
+        ),
         html.Hr(),
         controls,
         graphs,
